@@ -1,0 +1,8 @@
+[mcp_servers.web-design-pro]
+url = "https://web-design-pro-mcp-production.up.railway.app/mcp"
+bearer_token_env_var = "WEB_DESIGN_PRO_TOKEN"
+required = true
+tool_timeout_sec = 120
+
+[mcp_servers.web-design-pro.http_headers]
+X-Client-Version = "2026.10.23.1"
