@@ -1,0 +1,10 @@
+# commandとargsは、確認したPython実体とSkillの絶対パスへ置き換える。
+[mcp_servers.web-design-pro]
+command = 'C:\Path\To\python.exe'
+args = ['-u', 'C:\Path\To\web-design-pro\scripts\private-client.py', '--mcp-stdio']
+required = true
+tool_timeout_sec = 120
+
+[mcp_servers.web-design-pro.env]
+WDP_MCP_URL = "https://web-design-pro-mcp-production.up.railway.app/mcp"
+WDP_CLIENT_VERSION = "2026.10.25.3"

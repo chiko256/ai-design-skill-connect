@@ -8,8 +8,8 @@ description: AIデザインSkillの接続専用入口。契約者認証後に制
 この公開入口には制作手順・Figmaプラグイン・画像処理プログラムを含めない。
 
 1. 既存のMCP設定と契約者トークンを保持する。トークンを会話やコマンド本文へ書かない。
-2. `python3 <このSkill>/scripts/private-client.py --destination <このSkill> --migrate`を実行する。既存のCodex設定・環境変数を使って契約認証し、補助プログラムを含むクライアントを取得する。
+2. Python 3.11以降で`python3 <このSkill>/scripts/private-client.py --destination <このSkill> --migrate`を実行する。Windowsでは`py -3`または確認したPython実体を使い、.shは使わない。既存のCodex設定・環境変数を使って契約認証し、補助プログラムを含むクライアントを取得する。
 3. 認証に失敗した場合は停止し、端末上でのトークン設定を案内する。既存ファイルや設定を削除して回避しない。
-4. 取得成功後、この同じ場所の更新後`SKILL.md`を全文読み直して制作へ進む。
+4. 取得成功後、この同じ場所の更新後`SKILL.md`を全文読み直す。新規設定ではSETUP_WITH_AI.mdに従い、認証保存・MCP設定・更新確認・接続確認を完了してから制作へ進む。
 
 新規設定はSETUP_WITH_AI.mdに従う。既存利用者の設定・トークンの再発行は不要。ローカル変更がある場合は上書きしない。

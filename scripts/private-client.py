@@ -33,6 +33,45 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def windows_credential(value=None, target='ai-design-skill.web-design-pro'):
+    """Read/write this user's local Windows Credential Manager entry."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Credential(ctypes.Structure):
+        _fields_ = [('Flags', wintypes.DWORD), ('Type', wintypes.DWORD),
+                    ('TargetName', wintypes.LPWSTR), ('Comment', wintypes.LPWSTR),
+                    ('LastWritten', wintypes.FILETIME), ('CredentialBlobSize', wintypes.DWORD),
+                    ('CredentialBlob', ctypes.POINTER(ctypes.c_ubyte)), ('Persist', wintypes.DWORD),
+                    ('AttributeCount', wintypes.DWORD), ('Attributes', ctypes.c_void_p),
+                    ('TargetAlias', wintypes.LPWSTR), ('UserName', wintypes.LPWSTR)]
+
+    api = ctypes.WinDLL('Advapi32.dll', use_last_error=True)
+    pointer = ctypes.POINTER(Credential)
+    api.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(pointer)]
+    api.CredReadW.restype = wintypes.BOOL
+    api.CredWriteW.argtypes = [pointer, wintypes.DWORD]
+    api.CredWriteW.restype = wintypes.BOOL
+    api.CredFree.argtypes = [ctypes.c_void_p]
+    api.CredFree.restype = None
+    if value is not None:
+        data = value.encode('utf-8')
+        blob = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+        record = Credential(Type=1, TargetName=target, CredentialBlobSize=len(data),
+                            CredentialBlob=blob, Persist=2, UserName=getpass.getuser())
+        if not api.CredWriteW(ctypes.byref(record), 0):
+            raise OSError('Windows credential save failed')
+    record = pointer()
+    if not api.CredReadW(target, 1, 0, ctypes.byref(record)):
+        if ctypes.get_last_error() == 1168:
+            return ''
+        raise OSError('Windows credential read failed')
+    try:
+        return ctypes.string_at(record.contents.CredentialBlob, record.contents.CredentialBlobSize).decode('utf-8')
+    finally:
+        api.CredFree(record)
+
+
 def safe_name(name):
     if not isinstance(name, str) or not name or '\\' in name or ':' in name:
         raise ValueError('Invalid release path')
@@ -44,6 +83,8 @@ def safe_name(name):
 
 def credential(variable):
     value = os.environ.get(variable, '')
+    if not value and sys.platform == 'win32' and variable == 'WEB_DESIGN_PRO_TOKEN':
+        value = windows_credential()
     if not value and sys.platform == 'darwin' and variable == 'WEB_DESIGN_PRO_TOKEN':
         for command in [
             ['/bin/launchctl', 'getenv', variable],
@@ -56,11 +97,12 @@ def credential(variable):
     return value
 
 
-def connection(config, endpoint=None, prompt=False):
+def mcp_connection(config, endpoint=None, prompt=False):
     server = {}
     if config.is_file():
         server = tomllib.loads(config.read_text(encoding='utf-8')).get('mcp_servers', {}).get('web-design-pro', {})
-    url = endpoint or server.get('url', DEFAULT_ENDPOINT)
+    stdio_env = server.get('env', {}) if server.get('command') else {}
+    url = endpoint or server.get('url') or stdio_env.get('WDP_MCP_URL') or os.environ.get('WDP_MCP_URL', DEFAULT_ENDPOINT)
     parsed = urllib.parse.urlsplit(url)
     if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
         raise ValueError('Invalid MCP endpoint')
@@ -79,9 +121,48 @@ def connection(config, endpoint=None, prompt=False):
             raise ValueError('Contract token is missing; keep the existing MCP authentication setup or enter it in your terminal')
         headers['Authorization'] = 'Bearer ' + token
     if not any(k.lower() == 'x-client-version' for k in headers):
-        headers['X-Client-Version'] = '2026.09.18.1'
+        headers['X-Client-Version'] = stdio_env.get('WDP_CLIENT_VERSION') or os.environ.get('WDP_CLIENT_VERSION', '2026.09.18.1')
+    return url, headers
+
+
+def connection(config, endpoint=None, prompt=False):
+    url, headers = mcp_connection(config, endpoint, prompt)
+    parsed = urllib.parse.urlsplit(url)
     base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, '', '', ''))
     return base, headers
+
+
+def stdio_mcp(config):
+    """Connector for this service's stateless JSON HTTP transport."""
+    url, headers = mcp_connection(config)
+    headers.update({'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'})
+    opener = urllib.request.build_opener(NoRedirect())
+    for line in sys.stdin.buffer:
+        message = None
+        try:
+            if len(line) > 100 * 1024:
+                raise ValueError('MCP request is too large')
+            message = json.loads(line)
+            if not isinstance(message, dict) or message.get('jsonrpc') != '2.0':
+                raise ValueError('Invalid MCP message')
+            request = urllib.request.Request(url, data=line, headers=headers, method='POST')
+            with opener.open(request, timeout=120) as response:
+                raw = response.read(24 * 1024 * 1024 + 1)
+            if 'id' not in message or 'method' not in message:
+                continue
+            if len(raw) > 24 * 1024 * 1024:
+                raise ValueError('MCP response is too large')
+            result = json.loads(raw)
+            if not isinstance(result, dict) or result.get('id') != message['id']:
+                raise ValueError('Invalid MCP response')
+            if message.get('method') == 'initialize' and 'result' in result:
+                headers['MCP-Protocol-Version'] = result['result']['protocolVersion']
+        except (ValueError, KeyError, OSError, urllib.error.URLError):
+            if not isinstance(message, dict) or 'id' not in message or 'method' not in message:
+                continue
+            result = {'jsonrpc': '2.0', 'id': message['id'], 'error': {'code': -32603, 'message': 'AI Design connection failed; check contract authentication and network'}}
+        sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n')
+        sys.stdout.buffer.flush()
 
 
 def download(base, path, headers, limit):
@@ -228,7 +309,23 @@ def main():
     parser.add_argument('--endpoint')
     parser.add_argument('--migrate', action='store_true')
     parser.add_argument('--prompt-token', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--setup-windows-auth', action='store_true')
+    mode.add_argument('--mcp-stdio', action='store_true')
     args = parser.parse_args()
+    if args.setup_windows_auth:
+        if sys.platform != 'win32' or not sys.stdin.isatty():
+            raise ValueError('Run Windows authentication setup in your own Windows terminal')
+        token = getpass.getpass('Contract token (hidden): ').strip()
+        if not re.fullmatch(r'wdp_[A-Za-z0-9_-]{20,}', token):
+            raise ValueError('Invalid contract token format')
+        if windows_credential(token) != token:
+            raise ValueError('Windows credential verification failed')
+        print('ai-design-auth:configured')
+        return
+    if args.mcp_stdio:
+        stdio_mcp(args.config)
+        return
     if args.destination.is_symlink():
         raise ValueError('Client destination is a symbolic link')
     base, headers = connection(args.config, args.endpoint, args.prompt_token)

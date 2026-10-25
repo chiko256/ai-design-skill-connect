@@ -1,20 +1,24 @@
 # 接続専用入口の導入・移行
 
-既存のMCP設定とトークンは変更せず利用する。トークンをAIへの会話、Git、URL、ログへ記録しない。
+既存のMCP設定とトークンは保持する。トークンをAIへの会話、コマンド本文、Git、URL、ログへ記録しない。
+
+## 実行環境
+
+Python 3.11以降を確認する。macOS/Linuxでは`python3`、WindowsのPowerShellでは`py -3`を使う。Windowsでpyがない場合は、確認したPython実体の絶対パスで実行する。空白を含むパスは引用符で囲む。PowerShellで引用した実行ファイルを起動する場合は`&`を付ける。Windowsでは.shを実行するための追加シェルは不要。
+WindowsとWSLは別環境として扱い、Codexを動かす側のPython・設定・資格情報を使う。
 
 ## 既存の利用者
 
-1. 現在の `web-design-pro` Skillの実体パスを確認する。既存の接続設定・トークン・Figma .runtimeを削除しない。
-2. `scripts/private-client.py`を、このSkillフォルダの外にある作業領域へ取得する。
-3. MCPの契約情報にあるSHA-256と取得したインストーラーを照合する。
-4. `python3 <取得したprivate-client.py> --destination <現在のweb-design-pro> --migrate`を実行する。別のCodex設定を使う場合だけ`--config <使用中のconfig.toml>`を加える。
-5. 更新後の同じ場所のSKILL.mdを読み直す。`scripts/update-client.sh`を再実行しcurrentを確認する。
+1. 現在の`web-design-pro` Skillの実体パスを確認する。既存の接続設定・トークン・Figma .runtimeを削除しない。
+2. MCPの契約情報のinstallerUrlから`private-client.py`をSkillフォルダの外の作業領域へ取得し、installerSha256と照合する。
+3. `python3 <取得したprivate-client.py> --destination <現在のweb-design-pro> --migrate`を実行する。Windowsでは先頭を`py -3`へ置き換える。別のCodex設定を使う場合だけ`--config <使用中のconfig.toml>`を加える。
+4. 更新後の同じ場所のSKILL.mdを読み直す。認証設定が有効なら、同じインストーラーを再実行してcurrentを確認する。
 
-既存のローカル変更を検出したら上書きせず、バックアップして差分を確認する。GitHubの旧originを変更したり、git resetで変更を削除したりしない。
+既存のローカル変更を検出したら上書きせず、バックアップして差分を確認する。GitHubの旧origin変更やgit resetは行わない。
 
 ## 新規の利用者
 
-Python 3.11以降を使用する。このリポジトリを `~/.codex/skills/web-design-pro` にcloneする。
-トークンが環境に設定済みなら、上のインストーラーを`--migrate`で実行する。
-未設定の場合だけ、利用者自身の端末で`--prompt-token`を追加して実行し、非表示の入力欄へ本人に入力してもらう。トークンはインストーラーのメモリ内で認証にだけ使う。
-取得後はクライアント内のSETUP_WITH_AI.mdに従い、MCP設定とOSの資格情報ストアを整える。既存設定があれば保持する。
+1. このリポジトリを、Codexが使うSkillフォルダ内の`web-design-pro`へcloneする。標準はmacOS/Linuxが`~/.codex/skills/web-design-pro`、Windowsが`$HOME\.codex\skills\web-design-pro`。
+2. すでに契約認証が利用できれば、その設定を使う。Windowsで未設定なら、利用者自身のPowerShellで`py -3 <このSkill>/scripts/private-client.py --setup-windows-auth`を実行し、非表示の入力欄へ本人に入力してもらう。Windows資格情報マネージャーへ保存され、再起動後も同じ利用者の接続で使える。
+3. `python3 <このSkill>/scripts/private-client.py --destination <このSkill> --migrate`でクライアントを取得する。Windowsは`py -3`を使う。macOSなどで認証がまだなければ、利用者自身の端末で`--prompt-token`を加え、非表示の入力欄へ本人に入力してもらう。この一時入力は保存されない。
+4. 取得後は同じ場所のSETUP_WITH_AI.mdを読み、**認証の永続設定→MCP設定→更新確認→接続確認**の順に進む。一時入力で取得した直後に、認証の保存前の更新確認を行わない。
