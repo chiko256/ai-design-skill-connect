@@ -8,4 +8,4 @@ tool_timeout_sec = 120
 
 [mcp_servers.web-design-pro.env]
 WDP_MCP_URL = "https://web-design-pro-mcp-production.up.railway.app/mcp"
-WDP_CLIENT_VERSION = "2026.10.30.3"
+WDP_CLIENT_VERSION = "2026.10.30.4"
