@@ -1,0 +1,11 @@
+# commandはPython 3.11以上の実体、argsはこのSkillの実体パスに置き換える。
+# 認証は起動ごとにKeychainまたは既存の0600 tokenファイルから読み取る。
+[mcp_servers.web-design-pro]
+command = '/absolute/path/to/python3'
+args = ['-u', '/absolute/path/to/web-design-pro/scripts/private-client.py', '--mcp-stdio']
+required = true
+tool_timeout_sec = 120
+
+[mcp_servers.web-design-pro.env]
+WDP_MCP_URL = "https://web-design-pro-mcp-production.up.railway.app/mcp"
+WDP_CLIENT_VERSION = "2026.10.30.1"

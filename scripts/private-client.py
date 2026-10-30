@@ -81,6 +81,24 @@ def safe_name(name):
     return path
 
 
+def legacy_macos_token():
+    """Read a user's existing 0600 token file without sourcing a shell or changing it."""
+    token_file = Path.home() / '.config/web-design-pro/token'
+    try:
+        for parent in (token_file.parent.parent, token_file.parent):
+            if parent.is_symlink():
+                return ''
+        fd = os.open(token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 256:
+                return ''
+            value = stream.read(257).decode('ascii').strip()
+        return value if re.fullmatch(r'wdp_[A-Za-z0-9_-]{43}', value) else ''
+    except (OSError, UnicodeError):
+        return ''
+
+
 def credential(variable):
     value = os.environ.get(variable, '')
     if not value and sys.platform == 'win32' and variable == 'WEB_DESIGN_PRO_TOKEN':
@@ -90,10 +108,15 @@ def credential(variable):
             ['/bin/launchctl', 'getenv', variable],
             ['/usr/bin/security', 'find-generic-password', '-a', getpass.getuser(), '-s', 'ai-design-skill.web-design-pro', '-w']
         ]:
-            result = subprocess.run(command, capture_output=True, text=True)
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
             if result.returncode == 0 and result.stdout.strip():
                 value = result.stdout.strip()
                 break
+        if not value:
+            value = legacy_macos_token()
     return value
 
 
