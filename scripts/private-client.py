@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Authenticate, verify and install the AI Design client. No design runtime is bundled."""
 import argparse
+from contextlib import contextmanager
 import getpass
 import hashlib
 import io
@@ -8,7 +9,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -22,6 +22,75 @@ import zipfile
 
 DEFAULT_ENDPOINT = 'https://web-design-pro-mcp-production.up.railway.app/mcp'
 RECEIPT = '.private-client-release.json'
+TRANSACTION = '.private-client-transaction.json'
+TOKEN_FORMAT = re.compile(r'wdp_[A-Za-z0-9_-]{43}')
+
+
+@contextmanager
+def process_lock(file):
+    """OS-owned lock: a stopped process cannot leave a permanent busy flag."""
+    file = Path(file)
+    if file.is_symlink():
+        raise ValueError('Unsafe lock path')
+    fd = os.open(file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    locked = False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (os.name != 'nt' and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
+            raise ValueError('Unsafe lock permissions')
+        if os.name == 'nt':
+            import msvcrt
+            if not info.st_size:
+                os.write(fd, b'\0')
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise ValueError('Another update or migration is still running') from None
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError('Another update or migration is still running') from None
+        locked = True
+        yield
+    finally:
+        if locked:
+            if os.name == 'nt':
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        # Keep the inode: unlinking an advisory lock can split concurrent owners.
+
+
+def atomic_private(file, data):
+    fd, name = tempfile.mkstemp(prefix='.client-write-', dir=file.parent)
+    stage = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stage, file)
+    finally:
+        if stage.exists():
+            stage.unlink()
+
+
+def client_version(fallback='2026.09.18.1'):
+    """Use installed software identity, rather than a frozen connection setting."""
+    root = Path(__file__).resolve().parents[1]
+    receipt = root / RECEIPT
+    try:
+        version = json.loads(receipt.read_text(encoding='utf-8'))['version'] if receipt.is_file() else (root / 'VERSION').read_text().strip()
+        if re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', version):
+            return version
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return fallback
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -76,7 +145,7 @@ def safe_name(name):
     if not isinstance(name, str) or not name or '\\' in name or ':' in name:
         raise ValueError('Invalid release path')
     path = PurePosixPath(name)
-    if path.is_absolute() or str(path) != name or any(p in ('.', '..', '.git', '.runtime', RECEIPT) for p in path.parts):
+    if path.is_absolute() or str(path) != name or any(p in ('.', '..', '.git', '.runtime', RECEIPT, TRANSACTION) for p in path.parts):
         raise ValueError('Invalid release path')
     return path
 
@@ -101,6 +170,8 @@ def legacy_macos_token():
 
 def credential(variable):
     value = os.environ.get(variable, '')
+    if value and variable == 'WEB_DESIGN_PRO_TOKEN' and not TOKEN_FORMAT.fullmatch(value):
+        raise ValueError('Invalid configured contract credential')
     if not value and sys.platform == 'win32' and variable == 'WEB_DESIGN_PRO_TOKEN':
         value = windows_credential()
     if not value and sys.platform == 'darwin' and variable == 'WEB_DESIGN_PRO_TOKEN':
@@ -112,11 +183,13 @@ def credential(variable):
                 result = subprocess.run(command, capture_output=True, text=True, timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 continue
-            if result.returncode == 0 and result.stdout.strip():
+            if result.returncode == 0 and TOKEN_FORMAT.fullmatch(result.stdout.strip()):
                 value = result.stdout.strip()
                 break
         if not value:
             value = legacy_macos_token()
+    if value and variable == 'WEB_DESIGN_PRO_TOKEN' and not TOKEN_FORMAT.fullmatch(value):
+        raise ValueError('Invalid configured contract credential')
     return value
 
 
@@ -143,8 +216,8 @@ def mcp_connection(config, endpoint=None, prompt=False):
         if not token:
             raise ValueError('Contract token is missing; keep the existing MCP authentication setup or enter it in your terminal')
         headers['Authorization'] = 'Bearer ' + token
-    if not any(k.lower() == 'x-client-version' for k in headers):
-        headers['X-Client-Version'] = stdio_env.get('WDP_CLIENT_VERSION') or os.environ.get('WDP_CLIENT_VERSION', '2026.09.18.1')
+    headers = {k: v for k, v in headers.items() if k.lower() != 'x-client-version'} | {
+        'X-Client-Version': client_version(stdio_env.get('WDP_CLIENT_VERSION') or os.environ.get('WDP_CLIENT_VERSION', '2026.09.18.1'))}
     return url, headers
 
 
@@ -168,6 +241,7 @@ def stdio_mcp(config):
             message = json.loads(line)
             if not isinstance(message, dict) or message.get('jsonrpc') != '2.0':
                 raise ValueError('Invalid MCP message')
+            headers['X-Client-Version'] = client_version(headers['X-Client-Version'])
             request = urllib.request.Request(url, data=line, headers=headers, method='POST')
             with opener.open(request, timeout=120) as response:
                 raw = response.read(24 * 1024 * 1024 + 1)
@@ -205,7 +279,7 @@ def download(base, path, headers, limit):
 
 
 def validate_manifest(value):
-    if value.get('schema') != 1 or not re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', value.get('version', '')):
+    if not isinstance(value, dict) or value.get('schema') != 1 or not re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', value.get('version', '')):
         raise ValueError('Invalid client release')
     if value.get('archivePath') != '/client/archive' or not re.fullmatch(r'[a-f0-9]{64}', value.get('archiveSha256', '')):
         raise ValueError('Invalid client archive identity')
@@ -214,7 +288,7 @@ def validate_manifest(value):
         raise ValueError('Invalid client file manifest')
     for name, record in files.items():
         safe_name(name)
-        if not re.fullmatch(r'[a-f0-9]{64}', record.get('sha256', '')) or type(record.get('bytes')) is not int or not 0 <= record['bytes'] <= 8 * 1024 * 1024:
+        if not isinstance(record, dict) or not re.fullmatch(r'[a-f0-9]{64}', record.get('sha256', '')) or type(record.get('bytes')) is not int or not 0 <= record['bytes'] <= 8 * 1024 * 1024:
             raise ValueError('Invalid client file identity')
     if sum(v['bytes'] for v in files.values()) > 32 * 1024 * 1024:
         raise ValueError('Client release is too large')
@@ -258,18 +332,104 @@ def target_path(root, name):
     return result
 
 
+def recover_transaction(root):
+    journal = root / TRANSACTION
+    if not journal.exists():
+        return
+    if journal.is_symlink() or journal.stat().st_size > 2 * 1024 * 1024:
+        raise ValueError('Unsafe recovery journal')
+    state = json.loads(journal.read_text(encoding='utf-8'))
+    new = validate_manifest(state['release'])
+    old = validate_manifest(state['previous']) if state['previous'] else None
+    old_files = old['files'] if old else {}
+    changed = sorted(set(old_files) | set(new['files']))
+    if state.get('schema') != 1 or state['changed'] != changed or not re.fullmatch(r'[a-f0-9]{32}', state['backupId']):
+        raise ValueError('Invalid recovery journal')
+    backups = root.parent / ('.' + root.name + '-private-backups') / state['backupId']
+    existing = state['existing']
+    if not isinstance(existing, dict) or not set(existing).issubset(changed) or backups.is_symlink() or backups.parent.is_symlink():
+        raise ValueError('Unsafe recovery backup')
+    for original in existing.values():
+        if not isinstance(original, dict) or not re.fullmatch(r'[a-f0-9]{64}', original.get('sha256', '')) or type(original.get('mode')) is not int or not 0 <= original['mode'] <= 0o7777:
+            raise ValueError('Invalid recovery preimage')
+    receipt = root / RECEIPT
+    if receipt.is_symlink():
+        raise ValueError('Unsafe recovery receipt')
+    current = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else None
+    if current not in (old, new):
+        raise ValueError('Recovery receipt changed; preserve local edits')
+    complete = True
+    observed = {}
+    for name in changed:
+        target = target_path(root, name)
+        if target.exists() and not target.is_file():
+            raise ValueError('Recovery target changed; preserve local edits')
+        actual = digest(target.read_bytes()) if target.exists() else None
+        observed[name] = actual
+        original = existing.get(name)
+        if original:
+            saved = target_path(backups, name)
+            if not saved.is_file() or digest(saved.read_bytes()) != original['sha256']:
+                raise ValueError('Recovery backup differs')
+            if name in old_files and original['sha256'] not in {old_files[name]['sha256'], new['files'].get(name, {}).get('sha256')}:
+                raise ValueError('Recovery original differs')
+        desired = new['files'].get(name, {}).get('sha256')
+        allowed = {desired, original['sha256'] if original else None}
+        if name not in new['files']:
+            allowed.add(None)
+        elif original and desired:
+            allowed.discard(None)
+        if actual not in allowed:
+            raise ValueError('Recovery found local edits; files were preserved')
+        complete = complete and actual == desired
+    if current == new:
+        if not complete:
+            raise ValueError('Committed update changed; files were preserved')
+        journal.unlink()
+        return True
+    for name in reversed(changed):
+        target = target_path(root, name)
+        if (digest(target.read_bytes()) if target.is_file() else None) != observed[name]:
+            raise ValueError('Client changed during recovery; local edits were preserved')
+        if name in existing:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            atomic_private(target, target_path(backups, name).read_bytes())
+            target.chmod(existing[name]['mode'])
+        elif target.is_file():
+            target.unlink()
+    journal.unlink()
+    return True
+
+
 def install(root, release, files, migrate=False):
+    root = Path(root).absolute()
     if root.is_symlink():
         raise ValueError('Client destination is a symbolic link')
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with process_lock(root.parent / ('.' + root.name + '-private-update.lock')):
+        recovered = recover_transaction(root)
+        return install_locked(root, release, files, migrate or recovered)
+
+
+def install_locked(root, release, files, migrate):
     receipt = root / RECEIPT
+    if receipt.is_symlink():
+        raise ValueError('Client receipt is a symbolic link')
     previous = validate_manifest(json.loads(receipt.read_text())) if receipt.is_file() else None
     if root.exists() and any(root.iterdir()) and not previous and not migrate:
         raise ValueError('Initial migration requires --migrate; existing files were preserved')
     old_files = previous['files'] if previous else {}
     for name, record in old_files.items():
         target = target_path(root, name)
-        if not target.is_file() or digest(target.read_bytes()) != record['sha256']:
+        # A legacy interrupted installer may have already written known release bytes.
+        accepted = {record['sha256'], release['files'].get(name, {}).get('sha256')}
+        if (not target.is_file() and not (not target.exists() and name not in release['files'])) or (target.is_file() and digest(target.read_bytes()) not in accepted):
             raise ValueError('Local client changes were found; back them up before updating: ' + name)
+    if previous:
+        for name in release['files'].keys() - old_files.keys():
+            target = target_path(root, name)
+            if target.exists() and (not target.is_file() or digest(target.read_bytes()) != release['files'][name]['sha256']):
+                raise ValueError('A new release path conflicts with a local file; files were preserved: ' + name)
     if not previous:
         for name in release['files']:
             target = target_path(root, name)
@@ -282,18 +442,28 @@ def install(root, release, files, migrate=False):
         return 'current'
     root.parent.mkdir(parents=True, exist_ok=True)
     backups = root.parent / ('.' + root.name + '-private-backups') / uuid.uuid4().hex
+    if backups.parent.is_symlink():
+        raise ValueError('Unsafe client backup directory')
     backups.mkdir(parents=True, mode=0o700)
     changed = sorted(set(old_files) | set(files))
-    existing = set()
+    existing = {}
     for name in changed:
         target = target_path(root, name)
         if target.is_file():
             saved = backups / name
             saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, saved)
-            existing.add(name)
+            atomic_private(saved, target.read_bytes())
+            existing[name] = {'sha256': digest(saved.read_bytes()), 'mode': stat.S_IMODE(target.stat().st_mode)}
+            allowed = {old_files.get(name, {}).get('sha256'), release['files'].get(name, {}).get('sha256')}
+            if not previous:
+                allowed.update(release.get('legacyFiles', {}).get(name, []))
+            if existing[name]['sha256'] not in allowed and (previous or digest(saved.read_bytes().replace(b'\r\n', b'\n')) not in allowed):
+                raise ValueError('Client changed during backup; files were preserved')
     root.mkdir(mode=0o700, exist_ok=True)
-    applied = []
+    # atomic_private flushed each preimage before publishing the journal.
+    journal = root / TRANSACTION
+    atomic_private(journal, (json.dumps({'schema': 1, 'previous': previous, 'release': release,
+                                      'changed': changed, 'existing': existing, 'backupId': backups.name}) + '\n').encode())
     try:
         with tempfile.TemporaryDirectory(prefix='.client-staging-', dir=root.parent) as directory:
             stage = Path(directory)
@@ -304,7 +474,9 @@ def install(root, release, files, migrate=False):
                 dest.chmod(0o700 if release['files'][name].get('executable') else 0o600)
             for name in changed:
                 target = target_path(root, name)
-                applied.append(name)
+                actual = digest(target.read_bytes()) if target.is_file() else None
+                if actual != existing.get(name, {}).get('sha256'):
+                    raise ValueError('Client changed during update; files were preserved')
                 if name in files:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(stage / name, target)
@@ -314,13 +486,9 @@ def install(root, release, files, migrate=False):
             state.write_text(json.dumps(release, ensure_ascii=False, indent=2) + '\n')
             state.chmod(0o600)
             os.replace(state, receipt)
+        journal.unlink()
     except BaseException:
-        for name in reversed(applied):
-            target = target_path(root, name)
-            if name in existing:
-                shutil.copy2(backups / name, target)
-            elif target.is_file():
-                target.unlink()
+        recover_transaction(root)
         raise
     return 'updated'
 
@@ -340,7 +508,7 @@ def main():
         if sys.platform != 'win32' or not sys.stdin.isatty():
             raise ValueError('Run Windows authentication setup in your own Windows terminal')
         token = getpass.getpass('Contract token (hidden): ').strip()
-        if not re.fullmatch(r'wdp_[A-Za-z0-9_-]{20,}', token):
+        if not TOKEN_FORMAT.fullmatch(token):
             raise ValueError('Invalid contract token format')
         if windows_credential(token) != token:
             raise ValueError('Windows credential verification failed')

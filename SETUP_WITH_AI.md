@@ -12,7 +12,7 @@ WindowsとWSLは別環境として扱い、Codexを動かす側のPython・設�
 1. 現在の`web-design-pro` Skillの実体パスを確認する。既存の接続設定・トークン・Figma .runtimeを削除しない。
 2. MCPの契約情報のinstallerUrlから`private-client.py`をSkillフォルダの外の作業領域へ取得し、installerSha256と照合する。
 3. `python3 <取得したprivate-client.py> --destination <現在のweb-design-pro> --migrate`を実行する。Windowsでは先頭を`py -3`へ置き換える。別のCodex設定を使う場合だけ`--config <使用中のconfig.toml>`を加える。
-4. 更新後の同じ場所のSKILL.mdを読み直す。認証設定が有効なら、同じインストーラーを再実行してcurrentを確認する。
+4. 更新後の同じ場所のSKILL.mdを読み直し、起動時の接続移行まで進める。認証設定が有効なら、同じインストーラーを再実行してcurrentを確認する。
 
 既存のローカル変更を検出したら上書きせず、バックアップして差分を確認する。GitHubの旧origin変更やgit resetは行わない。
 

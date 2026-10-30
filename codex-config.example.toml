@@ -1,8 +1,9 @@
+# Python 3.11以上の実体と、このSkillの実体パスを指定する。
 [mcp_servers.web-design-pro]
-url = "https://web-design-pro-mcp-production.up.railway.app/mcp"
-bearer_token_env_var = "WEB_DESIGN_PRO_TOKEN"
+command = '/absolute/path/to/python3'
+args = ['-u', '/absolute/path/to/web-design-pro/scripts/private-client.py', '--mcp-stdio']
 required = true
 tool_timeout_sec = 120
 
-[mcp_servers.web-design-pro.http_headers]
-X-Client-Version = "2026.10.30.4"
+[mcp_servers.web-design-pro.env]
+WDP_MCP_URL = "https://web-design-pro-mcp-production.up.railway.app/mcp"
