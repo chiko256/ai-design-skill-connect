@@ -285,7 +285,7 @@ def prepare_native(config, loaded_url, loaded_headers, loaded_digest, remote):
             menu_bytes = target_path(root, menu_name).read_bytes()
             if not record or len(menu_bytes) > 4096 or digest(menu_bytes) != record['sha256']:
                 raise ValueError('Verified startup menu is unavailable')
-            return {'status': 'ready', **prepared,
+            return {'status': 'ready', 'update': prepared['update'],
                     'contractVerified': True, 'localFilesVerified': True,
                     'clientVersion': client_version(), 'bundleVersion': contract['bundleVersion'],
                     'clientGuidanceAvailable': contract.get('clientGuidanceVersion') == 1,
@@ -335,7 +335,8 @@ def stdio_mcp(config):
                     raise ValueError('Invalid startup arguments')
                 try:
                     value = prepare_native(config, url, headers, loaded_digest, remote)
-                    content = {'content': [{'type': 'text', 'text': json.dumps(value, separators=(',', ':'))}]}
+                    content = {'structuredContent': value,
+                               'content': [{'type': 'text', 'text': json.dumps(value, separators=(',', ':'))}]}
                     if value['status'] != 'ready':
                         content['isError'] = True
                 except (ValueError, TypeError, KeyError, OSError, urllib.error.URLError):
