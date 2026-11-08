@@ -337,11 +337,6 @@ def stdio_mcp(config):
                 continue
             if message.get('method') == 'initialize' and 'result' in result:
                 headers['MCP-Protocol-Version'] = result['result']['protocolVersion']
-                if result['result'].get('serverInfo', {}).get('name') == 'web-design-pro':
-                    result['result']['instructions'] = (
-                        'この接続はローカルのweb_design_prepareを提供します。AIデザインSkillの通常起動ではこれを引数{}で1回呼び、'
-                        'readyなら更新・接続準備・本番契約は確認済みです。別の起動コマンドや契約確認を重ねず、接続Skillの制作メニューへ進みます。'
-                        'blocked/restart_requiredでは停止します。\n\n' + result['result'].get('instructions', ''))
             if message.get('method') == 'tools/list' and 'result' in result:
                 listing = result['result'].get('tools', [])
                 if any(item.get('name') == 'web_design_contract' for item in listing):
