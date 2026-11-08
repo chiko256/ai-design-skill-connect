@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -228,11 +229,86 @@ def connection(config, endpoint=None, prompt=False):
     return base, headers
 
 
+PREPARE_TOOL = {
+    'name': 'web_design_prepare',
+    'title': 'AIデザインSkillの起動確認',
+    'description': 'このローカル接続Skillの配布ファイルを更新し、web-design-pro設定と同梱Bridgeを準備します。認証・ハッシュ・手動変更・未完了ジョブを検査し、実接続のMCP契約確認後だけreadyを返します。起動ごとに1回呼び、ready以外では停止します。',
+    'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True},
+}
+
+
+def contract_body(result):
+    if not isinstance(result, dict) or result.get('isError'):
+        raise ValueError('Contract check failed')
+    content = result.get('content', [])
+    if not isinstance(content, list):
+        raise ValueError('Invalid contract confirmation')
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'text':
+            try:
+                value = json.loads(item['text'].split('\n---\n', 1)[-1])
+            except (ValueError, KeyError):
+                continue
+            if (isinstance(value, dict) and value.get('productId') == 'web-design-pro'
+                    and re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', value.get('bundleVersion', ''))
+                    and re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', value.get('minimumClientVersion', ''))):
+                return value
+    raise ValueError('Invalid contract confirmation')
+
+
+def prepare_native(config, loaded_url, loaded_headers, loaded_digest, remote):
+    """Keep local checks and the real registered connection in one tool call."""
+    started = time.perf_counter()
+    root = Path(__file__).resolve().parents[1]
+    prepared = startup(root, config)
+    local_ms = round((time.perf_counter() - started) * 1000, 2)
+    status = 'blocked'
+    if prepared['connection'] == 'migrated-restart-required':
+        status = 'restart_required'
+    elif prepared['connection'] in {'current', 'not-needed', 'custom-connection-preserved'} and not prepared['bridge'].startswith('deferred-'):
+        current_url, current_headers = mcp_connection(config)
+        comparable = lambda headers: {k.lower(): v for k, v in headers.items()
+                                      if k.lower() not in {'x-client-version', 'content-type', 'accept', 'mcp-protocol-version'}}
+        if (current_url != loaded_url or comparable(current_headers) != comparable(loaded_headers)
+                or digest(Path(__file__).read_bytes()) != loaded_digest):
+            status = 'restart_required'
+        else:
+            checked_at = time.perf_counter()
+            response = remote({'jsonrpc': '2.0', 'id': 'local-startup-contract', 'method': 'tools/call',
+                               'params': {'name': 'web_design_contract', 'arguments': {}}})
+            if 'error' in response:
+                raise ValueError('Contract check failed')
+            contract = contract_body(response.get('result'))
+            return {'status': 'ready', **prepared,
+                    'clientVersion': client_version(), 'bundleVersion': contract['bundleVersion'],
+                    'clientGuidanceAvailable': contract.get('clientGuidanceVersion') == 1,
+                    'timingsMs': {'localStartup': local_ms,
+                                  'contract': round((time.perf_counter() - checked_at) * 1000, 2)}}
+    return {'status': status, **prepared, 'timingsMs': {'localStartup': local_ms}}
+
+
 def stdio_mcp(config):
     """Connector for this service's stateless JSON HTTP transport."""
     url, headers = mcp_connection(config)
     headers.update({'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'})
     opener = urllib.request.build_opener(NoRedirect())
+    loaded_digest = digest(Path(__file__).read_bytes())
+
+    def remote(message):
+        headers['X-Client-Version'] = client_version(headers['X-Client-Version'])
+        request = urllib.request.Request(url, data=json.dumps(message).encode('utf-8'), headers=headers, method='POST')
+        with opener.open(request, timeout=120) as response:
+            raw = response.read(24 * 1024 * 1024 + 1)
+        if 'id' not in message:
+            return None
+        if len(raw) > 24 * 1024 * 1024:
+            raise ValueError('MCP response is too large')
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get('id') != message['id']:
+            raise ValueError('Invalid MCP response')
+        return value
+
     for line in sys.stdin.buffer:
         message = None
         try:
@@ -241,20 +317,36 @@ def stdio_mcp(config):
             message = json.loads(line)
             if not isinstance(message, dict) or message.get('jsonrpc') != '2.0':
                 raise ValueError('Invalid MCP message')
-            headers['X-Client-Version'] = client_version(headers['X-Client-Version'])
-            request = urllib.request.Request(url, data=line, headers=headers, method='POST')
-            with opener.open(request, timeout=120) as response:
-                raw = response.read(24 * 1024 * 1024 + 1)
+            params = message.get('params', {})
+            if not isinstance(params, dict):
+                raise ValueError('Invalid MCP parameters')
+            if message.get('method') == 'tools/call' and params.get('name') == PREPARE_TOOL['name']:
+                if params.get('arguments', {}) != {} or 'id' not in message:
+                    raise ValueError('Invalid startup arguments')
+                try:
+                    value = prepare_native(config, url, headers, loaded_digest, remote)
+                    content = {'content': [{'type': 'text', 'text': json.dumps(value, separators=(',', ':'))}]}
+                    if value['status'] != 'ready':
+                        content['isError'] = True
+                except (ValueError, TypeError, KeyError, OSError, urllib.error.URLError):
+                    content = {'isError': True, 'content': [{'type': 'text', 'text': '{"status":"blocked","reason":"Startup verification failed; preserve files and inspect authentication, network or local changes"}'}]}
+                result = {'jsonrpc': '2.0', 'id': message['id'], 'result': content}
+            else:
+                result = remote(message)
             if 'id' not in message or 'method' not in message:
                 continue
-            if len(raw) > 24 * 1024 * 1024:
-                raise ValueError('MCP response is too large')
-            result = json.loads(raw)
-            if not isinstance(result, dict) or result.get('id') != message['id']:
-                raise ValueError('Invalid MCP response')
             if message.get('method') == 'initialize' and 'result' in result:
                 headers['MCP-Protocol-Version'] = result['result']['protocolVersion']
-        except (ValueError, KeyError, OSError, urllib.error.URLError):
+                if result['result'].get('serverInfo', {}).get('name') == 'web-design-pro':
+                    result['result']['instructions'] = (
+                        'この接続はローカルのweb_design_prepareを提供します。AIデザインSkillの通常起動ではこれを引数{}で1回呼び、'
+                        'readyなら更新・接続準備・本番契約は確認済みです。別の起動コマンドや契約確認を重ねず、接続Skillの制作メニューへ進みます。'
+                        'blocked/restart_requiredでは停止します。\n\n' + result['result'].get('instructions', ''))
+            if message.get('method') == 'tools/list' and 'result' in result:
+                listing = result['result'].get('tools', [])
+                if any(item.get('name') == 'web_design_contract' for item in listing):
+                    listing.append(PREPARE_TOOL)
+        except (ValueError, TypeError, KeyError, OSError, urllib.error.URLError):
             if not isinstance(message, dict) or 'id' not in message or 'method' not in message:
                 continue
             result = {'jsonrpc': '2.0', 'id': message['id'], 'error': {'code': -32603, 'message': 'AI Design connection failed; check contract authentication and network'}}
@@ -536,6 +628,13 @@ def prepare_startup(root, config, release):
     if not isinstance(value, dict) or value.get('connection') not in connections or value.get('bridge') not in bridges:
         raise ValueError('Invalid startup preparation result')
     return {'connection': value['connection'], 'bridge': value['bridge']}
+
+
+def startup(root, config):
+    base, headers = connection(config)
+    release = validate_manifest(json.loads(download(base, '/client/manifest', headers, 1024 * 1024)))
+    result = update_client(root, release, base, headers)
+    return {'update': result, **prepare_startup(root, config, release)}
 
 
 def main():
