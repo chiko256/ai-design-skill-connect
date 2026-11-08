@@ -232,7 +232,7 @@ def connection(config, endpoint=None, prompt=False):
 PREPARE_TOOL = {
     'name': 'web_design_prepare',
     'title': 'AIデザインSkillの起動確認',
-    'description': 'このローカル接続Skillの配布ファイルを更新し、web-design-pro設定と同梱Bridgeを準備します。認証・ハッシュ・手動変更・未完了ジョブを検査し、実接続のMCP契約確認後だけreadyと確定メニューmenuTextを返します。menuTextを提示して待ち、取得し直しません。起動ごとに1回、ready以外は停止します。',
+    'description': 'このローカル接続Skillの配布ファイルを更新し、web-design-pro設定と同梱Bridgeを準備します。認証・ハッシュ・手動変更・未完了ジョブを検査し、実接続のMCP契約確認後だけreadyと確定メニューmenuTextを返します。制作対象が未確定ならmenuTextを提示して待ち、取得し直しません。起動ごとに1回、ready以外は停止します。',
     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True},
 }
@@ -290,7 +290,9 @@ def prepare_native(config, loaded_url, loaded_headers, loaded_digest, remote):
                     'clientVersion': client_version(), 'bundleVersion': contract['bundleVersion'],
                     'clientGuidanceAvailable': contract.get('clientGuidanceVersion') == 1,
                     'menuText': menu_bytes.decode('utf-8').replace('\r\n', '\n').strip(),
-                    'nextAction': 'Show menuText and wait. Keep this verification for the menu reply; call web_design_start only after a choice. Do not repeat prepare or contract.',
+                    'nextAction': ('If the target is unknown, show menuText and wait. For menu reply n or an already-known target, call web_design_start once with the corresponding menuChoice. Keep this verification; do not repeat prepare or contract.'
+                                   if contract.get('menuChoiceRouting') is True else
+                                   'If the target is unknown, show menuText and wait. Otherwise start the known target without asking again. Keep this verification; do not repeat prepare or contract.'),
                     'timingsMs': {'localStartup': local_ms,
                                   'contract': round((time.perf_counter() - checked_at) * 1000, 2)}}
     return {'status': status, **prepared, 'timingsMs': {'localStartup': local_ms}}
