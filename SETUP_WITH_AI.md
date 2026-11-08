@@ -11,8 +11,8 @@ WindowsとWSLは別環境として扱い、Codexを動かす側のPython・設�
 
 1. 現在の`web-design-pro` Skillの実体パスを確認する。既存の接続設定・トークン・Figma .runtimeを削除しない。
 2. MCPの契約情報のinstallerUrlから`private-client.py`をSkillフォルダの外の作業領域へ取得し、installerSha256と照合する。
-3. `python3 <取得したprivate-client.py> --destination <現在のweb-design-pro> --migrate`を実行する。Windowsでは先頭を`py -3`へ置き換える。別のCodex設定を使う場合だけ`--config <使用中のconfig.toml>`を加える。
-4. 更新後の同じ場所のSKILL.mdを読み直し、起動時の接続移行まで進める。認証設定が有効なら、同じインストーラーを再実行してcurrentを確認する。
+3. `python3 <取得したprivate-client.py> --destination <現在のweb-design-pro> --migrate --startup`を実行する。Windowsでは先頭を`py -3`へ置き換える。別のCodex設定を使う場合だけ`--config <使用中のconfig.toml>`を加える。
+4. 更新後の同じ場所のSKILL.mdを読み直し、`ai-design-startup:`の結果を引き継いで接続移行の分岐を確認する。成功した取得・更新・準備を同じ起動内で再実行しない。
 
 既存のローカル変更を検出したら上書きせず、バックアップして差分を確認する。GitHubの旧origin変更やgit resetは行わない。
 
@@ -20,7 +20,7 @@ WindowsとWSLは別環境として扱い、Codexを動かす側のPython・設�
 
 1. このリポジトリを、Codexが使うSkillフォルダ内の`web-design-pro`へcloneする。標準はmacOS/Linuxが`~/.codex/skills/web-design-pro`、Windowsが`$HOME\.codex\skills\web-design-pro`。
 2. すでに契約認証が利用できれば、その設定を使う。Windowsで未設定なら、利用者自身のPowerShellで`py -3 <このSkill>/scripts/private-client.py --setup-windows-auth`を実行し、非表示の入力欄へ本人に入力してもらう。Windows資格情報マネージャーへ保存され、再起動後も同じ利用者の接続で使える。
-3. `python3 <このSkill>/scripts/private-client.py --destination <このSkill> --migrate`でクライアントを取得する。Windowsは`py -3`を使う。macOSで既存のtokenファイル・GUI環境・Keychainのいずれにも認証がなければ、利用者自身の端末で`--prompt-token`を加え、非表示の入力欄へ本人に入力してもらう。この一時入力は保存されない。
+3. `python3 <このSkill>/scripts/private-client.py --destination <このSkill> --migrate --startup`でクライアントを取得する。Windowsは`py -3`を使う。macOSで既存のtokenファイル・GUI環境・Keychainのいずれにも認証がなければ、利用者自身の端末で`--prompt-token`を加え、非表示の入力欄へ本人に入力してもらう。この一時入力は保存されない。
 4. 取得後は同じ場所のSETUP_WITH_AI.mdを読み、**認証の永続設定→MCP設定→更新確認→接続確認**の順に進む。一時入力で取得した直後に、認証の保存前の更新確認を行わない。
 
 ## macOSの認証復旧

@@ -411,7 +411,7 @@ def install(root, release, files, migrate=False):
         return install_locked(root, release, files, migrate or recovered)
 
 
-def install_locked(root, release, files, migrate):
+def check_local_release(root, release, migrate):
     receipt = root / RECEIPT
     if receipt.is_symlink():
         raise ValueError('Client receipt is a symbolic link')
@@ -438,8 +438,14 @@ def install_locked(root, release, files, migrate):
                 value = target.read_bytes()
                 if digest(value) not in allowed and digest(value.replace(b'\r\n', b'\n')) not in allowed:
                     raise ValueError('Unrecognized local client changes were preserved: ' + name)
+    return previous, old_files
+
+
+def install_locked(root, release, files, migrate):
+    previous, old_files = check_local_release(root, release, migrate)
     if previous and previous['version'] == release['version'] and previous['files'] == release['files']:
         return 'current'
+    receipt = root / RECEIPT
     root.parent.mkdir(parents=True, exist_ok=True)
     backups = root.parent / ('.' + root.name + '-private-backups') / uuid.uuid4().hex
     if backups.parent.is_symlink():
@@ -493,6 +499,45 @@ def install_locked(root, release, files, migrate):
     return 'updated'
 
 
+def update_client(root, release, base, headers, migrate=False):
+    """Check authenticated metadata and local files before fetching the archive."""
+    root = Path(root).absolute()
+    if root.is_symlink():
+        raise ValueError('Client destination is a symbolic link')
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with process_lock(root.parent / ('.' + root.name + '-private-update.lock')):
+        recovered = recover_transaction(root)
+        previous, _ = check_local_release(root, release, migrate or recovered)
+        if previous and previous['version'] == release['version'] and previous['files'] == release['files']:
+            return 'current'
+        files = unpack(download(base, release['archivePath'], headers, 8 * 1024 * 1024), release)
+        # Recheck under the same lock: local edits may occur during the download.
+        return install_locked(root, release, files, migrate or recovered)
+
+
+def prepare_startup(root, config, release):
+    """Run the verified, freshly installed repair code, including after self-update."""
+    script = target_path(Path(root).absolute(), 'scripts/startup-repair.py')
+    record = release['files'].get('scripts/startup-repair.py')
+    if not record or not script.is_file() or digest(script.read_bytes()) != record['sha256']:
+        raise ValueError('Verified startup preparation is unavailable')
+    try:
+        result = subprocess.run([sys.executable, '-X', 'utf8', str(script), '--config', str(config)],
+                                capture_output=True, text=True, encoding='utf-8', timeout=45)
+    except subprocess.TimeoutExpired:
+        raise ValueError('Startup preparation timed out; inspect existing jobs before retrying') from None
+    if result.returncode:
+        raise ValueError('Startup preparation failed; existing files were preserved')
+    value = json.loads(result.stdout)
+    connections = {'current', 'not-needed', 'custom-connection-preserved', 'migrated-restart-required',
+                   'setup-needed', 'authentication-needed', 'manual-configuration',
+                   'deferred-active-jobs', 'deferred-unknown-jobs'}
+    bridges = {'current', 'prepared', 'check-needed', 'deferred-active-jobs', 'deferred-unknown-jobs'}
+    if not isinstance(value, dict) or value.get('connection') not in connections or value.get('bridge') not in bridges:
+        raise ValueError('Invalid startup preparation result')
+    return {'connection': value['connection'], 'bridge': value['bridge']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--destination', type=Path, default=Path(__file__).resolve().parents[1])
@@ -503,6 +548,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--setup-windows-auth', action='store_true')
     mode.add_argument('--mcp-stdio', action='store_true')
+    mode.add_argument('--startup', action='store_true', help='Update and prepare the connection once for this activation')
     args = parser.parse_args()
     if args.setup_windows_auth:
         if sys.platform != 'win32' or not sys.stdin.isatty():
@@ -521,9 +567,12 @@ def main():
         raise ValueError('Client destination is a symbolic link')
     base, headers = connection(args.config, args.endpoint, args.prompt_token)
     release = validate_manifest(json.loads(download(base, '/client/manifest', headers, 1024 * 1024)))
-    files = unpack(download(base, release['archivePath'], headers, 8 * 1024 * 1024), release)
-    result = install(args.destination.absolute(), release, files, args.migrate)
-    print('ai-design-update:' + result)
+    result = update_client(args.destination, release, base, headers, args.migrate)
+    if args.startup:
+        prepared = prepare_startup(args.destination, args.config, release)
+        print('ai-design-startup:' + json.dumps({'update': result, **prepared}, separators=(',', ':')))
+    else:
+        print('ai-design-update:' + result)
 
 
 if __name__ == '__main__':
