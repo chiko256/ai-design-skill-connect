@@ -232,7 +232,7 @@ def connection(config, endpoint=None, prompt=False):
 PREPARE_TOOL = {
     'name': 'web_design_prepare',
     'title': 'AIデザインSkillの起動確認',
-    'description': 'このローカル接続Skillの配布ファイルを更新し、web-design-pro設定と同梱Bridgeを準備します。認証・ハッシュ・手動変更・未完了ジョブを検査し、実接続のMCP契約確認後だけreadyを返します。起動ごとに1回呼び、ready以外では停止します。',
+    'description': 'このローカル接続Skillの配布ファイルを更新し、web-design-pro設定と同梱Bridgeを準備します。認証・ハッシュ・手動変更・未完了ジョブを検査し、実接続のMCP契約確認後だけreadyと確定メニューmenuTextを返します。menuTextを提示して待ち、取得し直しません。起動ごとに1回、ready以外は停止します。',
     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True},
 }
@@ -261,7 +261,7 @@ def prepare_native(config, loaded_url, loaded_headers, loaded_digest, remote):
     """Keep local checks and the real registered connection in one tool call."""
     started = time.perf_counter()
     root = Path(__file__).resolve().parents[1]
-    prepared = startup(root, config)
+    prepared, release = startup(root, config)
     local_ms = round((time.perf_counter() - started) * 1000, 2)
     status = 'blocked'
     if prepared['connection'] == 'migrated-restart-required':
@@ -280,9 +280,17 @@ def prepare_native(config, loaded_url, loaded_headers, loaded_digest, remote):
             if 'error' in response:
                 raise ValueError('Contract check failed')
             contract = contract_body(response.get('result'))
+            menu_name = 'assets/startup-menu.txt'
+            record = release['files'].get(menu_name)
+            menu_bytes = target_path(root, menu_name).read_bytes()
+            if not record or len(menu_bytes) > 4096 or digest(menu_bytes) != record['sha256']:
+                raise ValueError('Verified startup menu is unavailable')
             return {'status': 'ready', **prepared,
+                    'contractVerified': True, 'localFilesVerified': True,
                     'clientVersion': client_version(), 'bundleVersion': contract['bundleVersion'],
                     'clientGuidanceAvailable': contract.get('clientGuidanceVersion') == 1,
+                    'menuText': menu_bytes.decode('utf-8').replace('\r\n', '\n').strip(),
+                    'nextAction': 'Show menuText and wait. Keep this verification for the menu reply; call web_design_start only after a choice. Do not repeat prepare or contract.',
                     'timingsMs': {'localStartup': local_ms,
                                   'contract': round((time.perf_counter() - checked_at) * 1000, 2)}}
     return {'status': status, **prepared, 'timingsMs': {'localStartup': local_ms}}
@@ -629,7 +637,7 @@ def startup(root, config):
     base, headers = connection(config)
     release = validate_manifest(json.loads(download(base, '/client/manifest', headers, 1024 * 1024)))
     result = update_client(root, release, base, headers)
-    return {'update': result, **prepare_startup(root, config, release)}
+    return {'update': result, **prepare_startup(root, config, release)}, release
 
 
 def main():
